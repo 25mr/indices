@@ -1,0 +1,30 @@
+version: 2.1
+
+parameters:
+  jp_kr_market_tracker:
+    type: boolean
+    default: false
+
+jobs:
+  send-report:
+    docker:
+    - image: cimg/python:3.12
+    resource_class: medium
+    
+    steps:
+    - checkout
+    - run:
+        name: Install dependencies
+        command: |
+          pip install requests beautifulsoup4 pytz playwright
+          playwright install chromium
+          playwright install-deps chromium
+    - run:
+        name: Fetch & send report
+        command: python main.py
+
+workflows:
+  Strategy_Report:
+    when: << pipeline.parameters.jp_kr_market_tracker >>
+    jobs:
+    - send-report
