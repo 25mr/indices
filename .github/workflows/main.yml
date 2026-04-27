@@ -1,0 +1,27 @@
+name: JP/KR Market Tracker
+
+on:
+  schedule:
+    - cron: '11 0 * * 1-5'
+    - cron: '56 3 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-tracker:
+    runs-on: docker
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          pip install requests beautifulsoup4 pytz playwright
+          playwright install --with-deps chromium
+      
+      - name: Run Market Tracker Script
+        env:
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+        run: python main.py
