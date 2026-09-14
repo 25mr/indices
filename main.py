@@ -55,8 +55,8 @@ COMMON_HEADERS = {
 }
 
 JPX_URL = "https://www.jpx.co.jp/english/markets/indices/realvalues/index.html"
-KOSPI_URL = "https://finance.naver.com/sise/sise_index.naver?code=KOSPI"
-KR_SECTOR_URL = "https://finance.naver.com/sise/sise_group.naver?type=upjong"
+KOSPI_URL = "https://stock.naver.com/domestic/index/KOSPI/price"
+KR_SECTOR_URL = "https://stock.naver.com/market/stock/kr/industry"
 
 TARGET_JPX_INDICES = [
     "JPX Prime 150 Index",
@@ -280,123 +280,99 @@ def top_bottom_sectors(sectors):
     top_down = sorted(valid, key=lambda x: x["change_pct"])[:5]
     return top_up, top_down
 
-# ================= requests 版：韩国指数 =================
-def fetch_naver_index_requests(code, index_name):
-    url = f"https://finance.naver.com/sise/sise_index.naver?code={code}"
-    headers = COMMON_HEADERS.copy()
-    headers["Referer"] = "https://finance.naver.com/"
-    try:
-        print(f"   [requests] Fetching {index_name}: {url}")
-        resp = requests.get(url, headers=headers, timeout=20)
-        print(f"   HTTP {resp.status_code} | {len(resp.content)} bytes")
-        resp.encoding = "euc-kr"
+def fetch_naver_index_playwright(code, index_name):
+    """
+    使用 Playwright 抓取新版 Naver Stock 指数页面
+    """
+    url = f"https://stock.naver.com/domestic/index/{code}/price"
+    print(f"   [playwright] Fetching {index_name}: {url}")
+    
+    item = {"name_en": index_name, "change_pct": None}
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=COMMON_HEADERS["User-Agent"])
+        page = context.new_page()
+        try:
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            # 等待涨跌幅元素出现 (新版类名通常包含 PriceChange_change)
+            page.wait_for_timeout(3000) 
+            
+            content = page.content()
+            soup = BeautifulSoup(content, "html.parser")
+            
+            # 在新版页面中找百分比，通常在 PriceChange_percentage 相关的 class 中
+            # 或者直接搜索包含 % 的文本
+            change_pct = None
+            
+            # 尝试从特定区域提取文本
+            # 新版结构通常是一个大的指数数值旁跟着涨跌百分比
+            page_text = page.locator("body").inner_text()
+            # 匹配例如 "+0.15%" 或 "-1.20%"
+            m_pct = re.search(r'([+-]?\d+\.\d+)%', page_text)
+            if m_pct:
+                change_pct = safe_float(m_pct.group(1))
+            
+            item["change_pct"] = change_pct
+            if change_pct is not None:
+                print(f"   ✅ {index_name} parsed: {change_pct}%")
+            else:
+                print(f"   ⚠️ Could not parse {index_name} from text")
+                
+        except Exception as e:
+            print(f"   ❌ Playwright failed for {index_name}: {e}")
+            item["error"] = str(e)
+        finally:
+            browser.close()
+    return item
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        change_pct = None
-
-        change_el = soup.select_one("#change_value_and_rate")
-        if change_el:
-            txt = normalize_name(change_el.get_text(" ", strip=True))
-            nums = re.findall(r"[+-]?\d[\d,]*\.?\d*", txt)
-            if len(nums) >= 2:
-                change_pct = safe_float(nums[1])
-
-        if change_pct is None:
-            detail = soup.select_one(".subtop_sise_detail")
-            if detail:
-                detail_text = normalize_name(detail.get_text(" ", strip=True))
-                m_pct = re.search(r"([+-]?\d[\d,]*\.?\d*)\s*%", detail_text)
-                if m_pct:
-                    change_pct = safe_float(m_pct.group(1))
-
-        item = {
-            "name_en": index_name,
-            "change_pct": change_pct,
-        }
-
-        if change_pct is None:
-            print(f"   ⚠️ Could not parse {index_name} change_pct via requests")
-            print(f"   HTML preview: {resp.text[:1200]}")
-
-        return item
-
-    except Exception as e:
-        print(f"   ❌ requests failed for {index_name}: {e}")
-        return {
-            "name_en": index_name,
-            "change_pct": None,
-            "error": f"requests failed: {e}",
-        }
-
-# ================= requests 版：韩国行业 =================
-def fetch_korea_sectors_requests():
+def fetch_korea_sectors_playwright():
+    """
+    使用 Playwright 抓取新版 Naver 行业板块页面
+    """
     url = KR_SECTOR_URL
-    headers = COMMON_HEADERS.copy()
-    headers["Referer"] = "https://finance.naver.com/"
+    print(f"   [playwright] Fetching KR sectors: {url}")
+    
+    sectors = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=COMMON_HEADERS["User-Agent"])
+        page = context.new_page()
+        try:
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(4000) # 等待列表加载
+            
+            # 获取所有表格行
+            # 新版 Naver 行业列表通常在 <tbody> 的 <tr> 中
+            rows = page.locator("table tr").all()
+            print(f"   Found {len(rows)} potential sector rows")
+            
+            for row in rows:
+                text = row.inner_text()
+                # 文本格式通常是: 行业名 \n 涨跌额 \n 涨跌幅
+                # 例如: "자동차\n4,500\n+1.25%"
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                
+                if len(lines) >= 2:
+                    name = lines[0]
+                    # 在该行文本中找百分比
+                    m_pct = re.search(r'([+-]?\d+\.\d+)%', text)
+                    if m_pct:
+                        pct = safe_float(m_pct.group(1))
+                        if pct is not None:
+                            sectors.append({
+                                "name_ko": name,
+                                "change_pct": pct
+                            })
+            
+            print(f"   ✅ KR sectors extracted: {len(sectors)}")
+        except Exception as e:
+            print(f"   ❌ Playwright failed for KR sectors: {e}")
+        finally:
+            browser.close()
+            
+    return sectors
 
-    try:
-        print(f"   [requests] Fetching KR sectors: {url}")
-        resp = requests.get(url, headers=headers, timeout=20)
-        print(f"   HTTP {resp.status_code} | {len(resp.content)} bytes")
-        resp.encoding = "euc-kr"
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        content = soup.select_one("#contentarea")
-        if not content:
-            print("   ⚠️ #contentarea not found")
-            print(f"   HTML preview: {resp.text[:1200]}")
-            return []
-
-        tables = content.find_all("table")
-        print(f"   Found {len(tables)} tables in #contentarea")
-
-        sectors = []
-        for table in tables:
-            rows = table.find_all("tr")
-            for tr in rows:
-                cols = tr.find_all("td")
-                if len(cols) < 3:
-                    continue
-
-                texts = [normalize_name(td.get_text(" ", strip=True)) for td in cols]
-                texts = [t for t in texts if t]
-
-                if len(texts) < 3:
-                    continue
-
-                name = texts[0]
-                if name in ["업종명", "전일대비", "등락률"]:
-                    continue
-
-                joined = " ".join(texts[1:])
-                change_pct = None
-
-                m_pct = re.search(r"([+-]?\d[\d,]*\.?\d*)\s*%", joined)
-                if m_pct:
-                    change_pct = safe_float(m_pct.group(1))
-                else:
-                    nums = re.findall(r"[+-]?\d[\d,]*\.?\d*", joined)
-                    if len(nums) >= 3:
-                        change_pct = safe_float(nums[2])
-
-                if name and change_pct is not None:
-                    sectors.append({
-                        "name_ko": name,
-                        "change_pct": change_pct,
-                    })
-
-        sectors = dedupe_dict_list(sectors, ["name_ko", "change_pct"])
-        print(f"   ✅ KR sectors extracted via requests: {len(sectors)}")
-        if sectors:
-            print(f"   Preview: {sectors[:5]}")
-        return sectors
-
-    except Exception as e:
-        print(f"   ❌ requests failed for KR sectors: {e}")
-        return []
-
-# ================= Playwright：JPX 页面 =================
 def fetch_jpx_with_playwright():
     """
     直接渲染 JPX realvalues 页面，抓页面文本 + 所有表格结构。
@@ -788,11 +764,12 @@ print("=" * 70)
 print("\n1/3 JPX via Playwright")
 jpx_data = fetch_jpx_with_playwright()
 
-print("\n2/3 KOSPI via requests")
-kospi_data = fetch_naver_index_requests("KOSPI", "KOSPI")
+print("\n2/3 KOSPI via Playwright")
+kospi_data = fetch_naver_index_playwright("KOSPI", "KOSPI")
+korea_indices = [kospi_data]
 
-print("\n3/3 KR sectors via requests")
-kr_sectors = fetch_korea_sectors_requests()
+print("\n3/3 KR sectors via Playwright")
+kr_sectors = fetch_korea_sectors_playwright()
 
 # ================= 排序整理 =================
 jp_sectors = jpx_data.get("sectors", [])
