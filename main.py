@@ -328,77 +328,50 @@ def fetch_naver_index_playwright(code, index_name):
 
 def fetch_korea_sectors_api():
     """
-    通过 stock.naver.com 内部 REST API 获取韩国业种（行业）排行
-    新版 API 替代旧版 finance.naver.com/sise/sise_group.naver
+    全量业种列表（不是涨幅 Top10）
+    GET /api/domestic/market/upjong/list?startIdx=0&pageSize=100&sortType=changeRate
     """
-    url = "https://stock.naver.com/api/stockSecurity/rankings/v2/domestic/industries"
+    url = "https://stock.naver.com/api/domestic/market/upjong/list"
+    params = {
+        "startIdx": 0,
+        "pageSize": 100,          # 必须够大，才能覆盖下跌行业
+        "sortType": "changeRate", # 按涨跌幅排序，但仍返回全量
+    }
     headers = COMMON_HEADERS.copy()
-    headers["Referer"] = "https://stock.naver.com/"
-    print(f"   [API] Fetching KR sectors: {url}")
+    headers["Referer"] = "https://stock.naver.com/market/stock/kr/industry"
+    print(f"   [API] Fetching KR sectors: {url} params={params}")
 
     sectors = []
     try:
-        resp = requests.get(url, headers=headers, timeout=20)
+        resp = requests.get(url, headers=headers, params=params, timeout=20)
         print(f"   HTTP {resp.status_code} | {len(resp.content)} bytes")
-
         if resp.status_code != 200:
-            print(f"   ⚠️ Non-200 status, response: {resp.text[:300]}")
+            print(f"   ⚠️ body: {resp.text[:300]}")
             return []
 
         data = resp.json()
-
-        # 打印结构以便调试
-        if isinstance(data, dict):
-            print(f"   API response keys: {list(data.keys())}")
-        elif isinstance(data, list):
-            print(f"   API response is list, length: {len(data)}")
-            if data:
-                print(f"   First item keys: {list(data[0].keys()) if isinstance(data[0], dict) else 'N/A'}")
-
-        # 解析行业列表 — 适配可能的多种结构
-        industry_list = []
-
-        if isinstance(data, list):
-            industry_list = data
-        elif isinstance(data, dict):
-            # 尝试常见的嵌套键名
-            for key in ["industries", "result", "data", "items", "ranks", "list"]:
-                if key in data:
-                    candidate = data[key]
-                    if isinstance(candidate, list):
-                        industry_list = candidate
-                        print(f"   Found industry list under key '{key}', length: {len(industry_list)}")
-                        break
-
-        if not industry_list:
-            print(f"   ⚠️ Could not locate industry list in response")
-            print(f"   Response preview: {json.dumps(data, ensure_ascii=False)[:800]}")
+        if not isinstance(data, list):
+            print(f"   ⚠️ unexpected type: {type(data)}")
+            print(f"   preview: {json.dumps(data, ensure_ascii=False)[:500]}")
             return []
 
-        # 打印第一条记录结构
-        if industry_list:
-            print(f"   First industry item: {json.dumps(industry_list[0], ensure_ascii=False)[:300]}")
+        print(f"   raw industries count: {len(data)}")
+        if data:
+            print(f"   first item keys: {list(data[0].keys())}")
+            print(f"   first item: name={data[0].get('name')}, changeRate={data[0].get('changeRate')}")
+            print(f"   last  item: name={data[-1].get('name')}, changeRate={data[-1].get('changeRate')}")
 
-        for item in industry_list:
+        for item in data:
             if not isinstance(item, dict):
                 continue
 
-            # 行业名称 — 尝试多种字段名
-            name = None
-            for nk in ["industryGroupKor", "industryName", "name", "upjongName",
-                        "sectorName", "industryGroupName", "industryKor", "title"]:
-                if nk in item and item[nk]:
-                    name = str(item[nk]).strip()
-                    break
+            name = (item.get("name") or "").strip()
+            # changeRate 是字符串，可能是 "4.36" / "-1.20" / "0.0"
+            change_pct = safe_float(item.get("changeRate"))
 
-            # 涨跌幅 — 尝试多种字段名
-            change_pct = None
-            for ck in ["fluctuationsRatio", "changeRate", "compareToPreviousCloseRatio",
-                        "changeRatio", "rate", "changePercent", "chgRate"]:
-                if ck in item:
-                    change_pct = safe_float(item[ck])
-                    if change_pct is not None:
-                        break
+            # 可选：排除“기타”（大杂烩，波动常失真）
+            # if name == "기타":
+            #     continue
 
             if name and change_pct is not None:
                 sectors.append({
@@ -406,17 +379,27 @@ def fetch_korea_sectors_api():
                     "change_pct": change_pct,
                 })
 
-        sectors = dedupe_dict_list(sectors, ["name_ko", "change_pct"])
-        print(f"   ✅ KR sectors extracted via API: {len(sectors)}")
+        sectors = dedupe_dict_list(sectors, ["name_ko"])
+        print(f"   ✅ KR sectors extracted: {len(sectors)}")
+
+        # 校验正负分布（非常关键）
+        n_up = sum(1 for s in sectors if s["change_pct"] > 0)
+        n_flat = sum(1 for s in sectors if s["change_pct"] == 0)
+        n_down = sum(1 for s in sectors if s["change_pct"] < 0)
+        print(f"   distribution: up={n_up}, flat={n_flat}, down={n_down}")
+
         if sectors:
-            print(f"   Preview: {sectors[:3]}")
+            by_pct = sorted(sectors, key=lambda x: x["change_pct"], reverse=True)
+            print("   Top3 up :", [(x["name_ko"], x["change_pct"]) for x in by_pct[:3]])
+            print("   Top3 down:", [(x["name_ko"], x["change_pct"]) for x in by_pct[-3:]])
+
+        return sectors
 
     except Exception as e:
-        print(f"   ❌ API failed for KR sectors: {e}")
+        print(f"   ❌ KR sectors API failed: {e}")
         import traceback
         traceback.print_exc()
-
-    return sectors
+        return []
 
 def fetch_jpx_with_playwright():
     """
