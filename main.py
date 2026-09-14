@@ -326,66 +326,96 @@ def fetch_naver_index_playwright(code, index_name):
             browser.close()
     return item
 
-def fetch_korea_sectors_playwright():
+def fetch_korea_sectors_api():
     """
-    使用 Playwright 抓取新版 Naver 行业板块页面（单元格方式解析）
+    通过 stock.naver.com 内部 REST API 获取韩国业种（行业）排行
+    新版 API 替代旧版 finance.naver.com/sise/sise_group.naver
     """
-    url = KR_SECTOR_URL
-    print(f"   [playwright] Fetching KR sectors: {url}")
-    
-    sectors = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=COMMON_HEADERS["User-Agent"])
-        page = context.new_page()
-        try:
-            page.goto(url, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(4000)  # 等待 React 列表渲染
-            
-            # 更精确地定位 tbody 下的行
-            rows = page.locator("table tbody tr").all()
-            print(f"   Found {len(rows)} rows in table tbody")
+    url = "https://stock.naver.com/api/stockSecurity/rankings/v2/domestic/industries"
+    headers = COMMON_HEADERS.copy()
+    headers["Referer"] = "https://stock.naver.com/"
+    print(f"   [API] Fetching KR sectors: {url}")
 
-            for idx, row in enumerate(rows[:5]):
-                print(f"Row {idx}: {row.inner_text()[:200]}")
-            
-            for idx, row in enumerate(rows):
-                tds = row.locator("td").all()
-                if len(tds) < 3:          # 至少要有名称 + 涨跌幅
-                    continue
-                
-                # 第 0 个 td 通常是行业名称
-                name = tds[0].inner_text().strip()
-                
-                # 跳过表头
-                if name in ["업종명", "전일대비", "등락률", ""]:
-                    continue
-                
-                # 在所有 td 中找包含百分比的单元格
-                change_pct = None
-                for td in tds:
-                    txt = td.inner_text().strip()
-                    m_pct = re.search(r'([+-]?\d+\.\d+)%', txt)
-                    if m_pct:
-                        change_pct = safe_float(m_pct.group(1))
+    sectors = []
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        print(f"   HTTP {resp.status_code} | {len(resp.content)} bytes")
+
+        if resp.status_code != 200:
+            print(f"   ⚠️ Non-200 status, response: {resp.text[:300]}")
+            return []
+
+        data = resp.json()
+
+        # 打印结构以便调试
+        if isinstance(data, dict):
+            print(f"   API response keys: {list(data.keys())}")
+        elif isinstance(data, list):
+            print(f"   API response is list, length: {len(data)}")
+            if data:
+                print(f"   First item keys: {list(data[0].keys()) if isinstance(data[0], dict) else 'N/A'}")
+
+        # 解析行业列表 — 适配可能的多种结构
+        industry_list = []
+
+        if isinstance(data, list):
+            industry_list = data
+        elif isinstance(data, dict):
+            # 尝试常见的嵌套键名
+            for key in ["industries", "result", "data", "items", "ranks", "list"]:
+                if key in data:
+                    candidate = data[key]
+                    if isinstance(candidate, list):
+                        industry_list = candidate
+                        print(f"   Found industry list under key '{key}', length: {len(industry_list)}")
                         break
-                
-                if name and change_pct is not None:
-                    sectors.append({
-                        "name_ko": name,
-                        "change_pct": change_pct
-                    })
-            
-            sectors = dedupe_dict_list(sectors, ["name_ko", "change_pct"])
-            print(f"   ✅ KR sectors extracted: {len(sectors)}")
-            if sectors:
-                print(f"   Preview: {sectors[:3]}")
-                
-        except Exception as e:
-            print(f"   ❌ Playwright failed for KR sectors: {e}")
-        finally:
-            browser.close()
-            
+
+        if not industry_list:
+            print(f"   ⚠️ Could not locate industry list in response")
+            print(f"   Response preview: {json.dumps(data, ensure_ascii=False)[:800]}")
+            return []
+
+        # 打印第一条记录结构
+        if industry_list:
+            print(f"   First industry item: {json.dumps(industry_list[0], ensure_ascii=False)[:300]}")
+
+        for item in industry_list:
+            if not isinstance(item, dict):
+                continue
+
+            # 行业名称 — 尝试多种字段名
+            name = None
+            for nk in ["industryGroupKor", "industryName", "name", "upjongName",
+                        "sectorName", "industryGroupName", "industryKor", "title"]:
+                if nk in item and item[nk]:
+                    name = str(item[nk]).strip()
+                    break
+
+            # 涨跌幅 — 尝试多种字段名
+            change_pct = None
+            for ck in ["fluctuationsRatio", "changeRate", "compareToPreviousCloseRatio",
+                        "changeRatio", "rate", "changePercent", "chgRate"]:
+                if ck in item:
+                    change_pct = safe_float(item[ck])
+                    if change_pct is not None:
+                        break
+
+            if name and change_pct is not None:
+                sectors.append({
+                    "name_ko": name,
+                    "change_pct": change_pct,
+                })
+
+        sectors = dedupe_dict_list(sectors, ["name_ko", "change_pct"])
+        print(f"   ✅ KR sectors extracted via API: {len(sectors)}")
+        if sectors:
+            print(f"   Preview: {sectors[:3]}")
+
+    except Exception as e:
+        print(f"   ❌ API failed for KR sectors: {e}")
+        import traceback
+        traceback.print_exc()
+
     return sectors
 
 def fetch_jpx_with_playwright():
@@ -783,8 +813,8 @@ print("\n2/3 KOSPI via Playwright")
 kospi_data = fetch_naver_index_playwright("KOSPI", "KOSPI")
 korea_indices = [kospi_data]
 
-print("\n3/3 KR sectors via Playwright")
-kr_sectors = fetch_korea_sectors_playwright()
+print("\n3/3 KR sectors via API")
+kr_sectors = fetch_korea_sectors_api()
 
 # ================= 排序整理 =================
 jp_sectors = jpx_data.get("sectors", [])
