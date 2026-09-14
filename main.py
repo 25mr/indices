@@ -900,58 +900,6 @@ except requests.exceptions.Timeout:
 except Exception as e:
     print(f"\n❌ Exception sending email: {type(e).__name__}: {str(e)}")
 
-# ================= Brevo 账户诊断 =================
-print("\n" + "=" * 70)
-print("🔎 [Step 5] Checking Brevo account status...")
-print("=" * 70)
-
-try:
-    account_resp = requests.get(
-        "https://api.brevo.com/v3/account",
-        headers={"accept": "application/json", "api-key": BREVO_API_KEY},
-        timeout=15
-    )
-    print(f"   Account API Status: {account_resp.status_code}")
-    if account_resp.status_code == 200:
-        acct = account_resp.json()
-        print(f"   Company: {acct.get('companyName', 'N/A')}")
-        print(f"   Email: {acct.get('email', 'N/A')}")
-        for p in acct.get("plan", []):
-            print(f"   Plan: {p.get('type', '?')} - Credits: {p.get('credits', '?')} - Credit Type: {p.get('creditsType', '?')}")
-    else:
-        print(f"   ⚠️ Could not fetch account info: {account_resp.text}")
-except Exception as e:
-    print(f"   ❌ Exception: {e}")
-
-try:
-    senders_resp = requests.get(
-        "https://api.brevo.com/v3/senders",
-        headers={"accept": "application/json", "api-key": BREVO_API_KEY},
-        timeout=15
-    )
-    print(f"\n   Senders API Status: {senders_resp.status_code}")
-    if senders_resp.status_code == 200:
-        senders = senders_resp.json().get("senders", [])
-        if senders:
-            print(f"   Verified senders ({len(senders)}):")
-            verified = []
-            for s in senders:
-                email = s.get("email", "?")
-                active = s.get("active", "?")
-                print(f"      - {s.get('name', '?')} <{email}> (active: {active})")
-                if active:
-                    verified.append(email.lower())
-
-            if SENDER_EMAIL.lower() not in verified:
-                print(f"\n   🚨 WARNING: SENDER_EMAIL '{SENDER_EMAIL}' is NOT in verified senders list!")
-                print(f"   👉 Please verify it in Brevo or use one of: {verified}")
-        else:
-            print("   ⚠️ No verified senders found!")
-    else:
-        print(f"   ⚠️ Could not fetch senders: {senders_resp.text}")
-except Exception as e:
-    print(f"   ❌ Exception: {e}")
-
 print("\n" + "=" * 70)
 print("🏁 Script finished.")
 print("=" * 70)
