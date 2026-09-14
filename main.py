@@ -328,97 +328,64 @@ def fetch_naver_index_playwright(code, index_name):
 
 def fetch_korea_sectors_playwright():
     """
-    新版 Naver 行业板块抓取：
-    - 优先按表格列定位：第2列为行业名，包含 % 的列为涨跌幅
-    - 兜底：从行文本中正则提取 行业名 + 百分比
-    - 自动过滤表头、空行、非数据行
+    使用 Playwright 抓取新版 Naver 行业板块页面（单元格方式解析）
     """
     url = KR_SECTOR_URL
     print(f"   [playwright] Fetching KR sectors: {url}")
-
+    
     sectors = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=COMMON_HEADERS["User-Agent"],
-            locale="ko-KR",
-        )
+        context = browser.new_context(user_agent=COMMON_HEADERS["User-Agent"])
         page = context.new_page()
-
         try:
             page.goto(url, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(4000)  # 等待 React 渲染和数据加载
-
-            # 滚动到底部，确保虚拟列表全部加载（如有）
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(2000)
-
-            # 获取所有表格行
+            page.wait_for_timeout(4000)  # 等待 React 列表渲染
+            
+            # 更精确地定位 tbody 下的行
             rows = page.locator("table tbody tr").all()
-            print(f"   Found {len(rows)} table rows")
+            print(f"   Found {len(rows)} rows in table tbody")
 
+            for idx, row in enumerate(rows[:5]):
+                print(f"Row {idx}: {row.inner_text()[:200]}")
+            
             for idx, row in enumerate(rows):
-                try:
-                    cells = row.locator("td").all()
-                    if len(cells) < 3:
-                        continue
-
-                    # 1) 从单元格文本中提取行业名：优先找带链接的名称
-                    name = ""
-                    # 遍历单元格，找到第一个非数字、非百分号、非空的文本作为名称
-                    for cell in cells:
-                        cell_text = cell.inner_text().strip()
-                        # 排除纯数字、纯百分比、纯符号
-                        if not cell_text:
-                            continue
-                        if re.fullmatch(r'[+-]?[\d,.]+%?', cell_text):
-                            continue
-                        if cell_text in ["업종명", "전일대비", "등락률", "종목수"]:
-                            continue
-                        # 行业名通常包含韩文，且长度大于1
-                        if re.search(r'[가-힣]', cell_text) and len(cell_text) > 1:
-                            name = cell_text
-                            break
-
-                    # 2) 提取涨跌幅百分比
-                    row_text = row.inner_text()
-                    m_pct = re.search(r'([+-]?\d+\.\d+)%', row_text)
-                    change_pct = safe_float(m_pct.group(1)) if m_pct else None
-
-                    # 3) 兜底：如果没找到名称，从行文本中提取第一个韩文短语
-                    if not name:
-                        name_matches = re.findall(r'[가-힣a-zA-Z&,· ]{2,}', row_text)
-                        for candidate in name_matches:
-                            candidate = candidate.strip()
-                            if candidate and not re.fullmatch(r'[\d,.%+-]+', candidate):
-                                name = candidate
-                                break
-
-                    if name and change_pct is not None:
-                        sectors.append({
-                            "name_ko": name,
-                            "change_pct": change_pct,
-                        })
-
-                except Exception as e:
-                    # 单行解析失败不影响整体
+                tds = row.locator("td").all()
+                if len(tds) < 3:          # 至少要有名称 + 涨跌幅
                     continue
-
-            # 去重：同一行业只保留一条
-            sectors = dedupe_dict_list(sectors, ["name_ko"])
+                
+                # 第 0 个 td 通常是行业名称
+                name = tds[0].inner_text().strip()
+                
+                # 跳过表头
+                if name in ["업종명", "전일대비", "등락률", ""]:
+                    continue
+                
+                # 在所有 td 中找包含百分比的单元格
+                change_pct = None
+                for td in tds:
+                    txt = td.inner_text().strip()
+                    m_pct = re.search(r'([+-]?\d+\.\d+)%', txt)
+                    if m_pct:
+                        change_pct = safe_float(m_pct.group(1))
+                        break
+                
+                if name and change_pct is not None:
+                    sectors.append({
+                        "name_ko": name,
+                        "change_pct": change_pct
+                    })
+            
+            sectors = dedupe_dict_list(sectors, ["name_ko", "change_pct"])
             print(f"   ✅ KR sectors extracted: {len(sectors)}")
-
-            # 调试：打印前10条，方便核对
             if sectors:
-                print("   Preview (name_ko, change_pct):")
-                for s in sectors[:10]:
-                    print(f"     {s['name_ko']:20s}  {s['change_pct']:+.2f}%")
-
+                print(f"   Preview: {sectors[:3]}")
+                
         except Exception as e:
             print(f"   ❌ Playwright failed for KR sectors: {e}")
         finally:
             browser.close()
-
+            
     return sectors
 
 def fetch_jpx_with_playwright():
