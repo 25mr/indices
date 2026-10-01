@@ -401,6 +401,36 @@ def fetch_korea_sectors_api():
         traceback.print_exc()
         return []
 
+def extract_pct_from_text(seg):
+    """从一段文本中提取涨跌幅"""
+    m_pct = re.search(r"([+-]?\d[\d,]*\.?\d*)\s*%", seg)
+    if m_pct:
+        return safe_float(m_pct.group(1))
+    nums = re.findall(r"[+-]?\d[\d,]*\.?\d*", seg)
+    if len(nums) >= 3:
+        return safe_float(nums[2])
+    return None
+
+
+def find_exact_name_in_text(text, name, lookahead_lines=3):
+    """
+    在 inner_text 中查找"名称精确等于 name"的行。
+    inner_text 中表格一行通常是 tab 分隔，或者每个单元格占一行。
+    要求该行第一个字段（去空白后）== name，避免匹配
+    'TOPIX Banks High Dividend Index' 这类包含 name 的长名称。
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        fields = [normalize_name(f) for f in line.split("\t")]
+        fields = [f for f in fields if f]
+        if fields and fields[0] == name:
+            # 当前行剩余字段 + 后面几行，用于提取数字
+            seg = " | ".join(fields[1:])
+            if not seg:
+                seg = " | ".join(lines[i + 1:i + 1 + lookahead_lines])
+            return seg
+    return None
+
 def fetch_jpx_with_playwright():
     """
     直接渲染 JPX realvalues 页面，抓页面文本 + 所有表格结构。
@@ -544,51 +574,42 @@ def fetch_jpx_with_playwright():
 
             # --- Sectors ---
             sectors = []
+            found_names = set()
+
             for row in all_rows:
                 cells = row["cells"]
-                row_text = " | ".join(cells)
 
                 for sector_name in JPX_SECTOR_NAMES:
-                    if sector_name in row_text:
-                        pct = None
-                        m_pct = re.search(r"([+-]?\d[\d,]*\.?\d*)\s*%", row_text)
-                        if m_pct:
-                            pct = safe_float(m_pct.group(1))
-                        else:
-                            nums = re.findall(r"[+-]?\d[\d,]*\.?\d*", row_text)
-                            if len(nums) >= 3:
-                                pct = safe_float(nums[2])
+                    if sector_name in found_names:
+                        continue
+                    # 精确匹配：某个单元格内容必须完全等于行业名
+                    if sector_name in cells:
+                        idx = cells.index(sector_name)
+                        # 只从名称之后的单元格里取数字，避免名称本身带数字的干扰
+                        rest_text = " | ".join(cells[idx + 1:])
+                        pct = extract_pct_from_text(rest_text)
 
                         sectors.append({
                             "name_en": sector_name,
                             "change_pct": pct,
                         })
+                        found_names.add(sector_name)
+                        break  # 一行只对应一个行业
 
-            sectors = dedupe_dict_list(sectors, ["name_en", "change_pct"])
-
-            missing_sector_names = [s for s in JPX_SECTOR_NAMES if s not in [x["name_en"] for x in sectors]]
+            missing_sector_names = [s for s in JPX_SECTOR_NAMES if s not in found_names]
             if missing_sector_names:
                 print(f"   ℹ️ Missing JPX sectors from rows: {len(missing_sector_names)}; trying full text fallback...")
                 for sector_name in missing_sector_names:
-                    pattern = re.escape(sector_name) + r"(.{0,120})"
-                    m = re.search(pattern, text, flags=re.S)
-                    if m:
-                        seg = m.group(0)
-                        pct = None
-                        m_pct = re.search(r"([+-]?\d[\d,]*\.?\d*)\s*%", seg)
-                        if m_pct:
-                            pct = safe_float(m_pct.group(1))
-                        else:
-                            nums = re.findall(r"[+-]?\d[\d,]*\.?\d*", seg)
-                            if len(nums) >= 3:
-                                pct = safe_float(nums[2])
-
+                    seg = find_exact_name_in_text(text, sector_name)
+                    if seg is not None:
                         sectors.append({
                             "name_en": sector_name,
-                            "change_pct": pct,
+                            "change_pct": extract_pct_from_text(seg),
                         })
+                        found_names.add(sector_name)
 
-            sectors = dedupe_dict_list(sectors, ["name_en", "change_pct"])
+            # 只按名称去重
+            sectors = dedupe_dict_list(sectors, ["name_en"])
 
             result["major_indices"] = major_final
             result["sectors"] = sectors
