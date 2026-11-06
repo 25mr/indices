@@ -327,71 +327,126 @@ def fetch_naver_index_playwright(code, index_name):
     return item
 
 def fetch_korea_sectors_api():
-    """
-    全量业种列表（不是涨幅 Top10）
-    GET /api/domestic/market/upjong/list?startIdx=0&pageSize=100&sortType=changeRate
-    """
-    url = "https://stock.naver.com/api/domestic/market/upjong/list"
+    """获取韩国业种当日涨跌幅，返回 name_ko/change_pct 格式。"""
+    url = (
+        "https://stock.naver.com/api/"
+        "stockSecurity/rankings/v2/domestic/industries"
+    )
     params = {
-        "startIdx": 0,
-        "pageSize": 100,          # 必须够大，才能覆盖下跌行业
-        "sortType": "changeRate", # 按涨跌幅排序，但仍返回全量
+        "sortType": "changeRate",
+        "period": "daily",
+        "size": 100,
     }
+
     headers = COMMON_HEADERS.copy()
-    headers["Referer"] = "https://stock.naver.com/market/stock/kr/industry"
-    print(f"   [API] Fetching KR sectors: {url} params={params}")
+    headers["Accept"] = "application/json"
+    headers["Referer"] = (
+        "https://stock.naver.com/market/stock/kr/industry"
+    )
 
     sectors = []
+    seen_cursors = set()
+
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=20)
-        print(f"   HTTP {resp.status_code} | {len(resp.content)} bytes")
-        if resp.status_code != 200:
-            print(f"   ⚠️ body: {resp.text[:300]}")
-            return []
+        while True:
+            print(f"   [API] Fetching KR sectors: {url} params={params}")
 
-        data = resp.json()
-        if not isinstance(data, list):
-            print(f"   ⚠️ unexpected type: {type(data)}")
-            print(f"   preview: {json.dumps(data, ensure_ascii=False)[:500]}")
-            return []
+            resp = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
+            print(f"   HTTP {resp.status_code} | {len(resp.content)} bytes")
 
-        print(f"   raw industries count: {len(data)}")
-        if data:
-            print(f"   first item keys: {list(data[0].keys())}")
-            print(f"   first item: name={data[0].get('name')}, changeRate={data[0].get('changeRate')}")
-            print(f"   last  item: name={data[-1].get('name')}, changeRate={data[-1].get('changeRate')}")
+            if resp.status_code != 200:
+                print(f"   ⚠️ body: {resp.text[:300]}")
+                return []
 
-        for item in data:
-            if not isinstance(item, dict):
-                continue
+            data = resp.json()
 
-            name = (item.get("name") or "").strip()
-            # changeRate 是字符串，可能是 "4.36" / "-1.20" / "0.0"
-            change_pct = safe_float(item.get("changeRate"))
+            # v2 接口：顶层是对象，业种列表在 items 中。
+            if (
+                not isinstance(data, dict)
+                or not isinstance(data.get("items"), list)
+            ):
+                print(f"   ⚠️ unexpected structure: {type(data)}")
+                print(
+                    "   preview: "
+                    + json.dumps(data, ensure_ascii=False)[:500]
+                )
+                return []
 
-            # 可选：排除“기타”（大杂烩，波动常失真）
-            # if name == "기타":
-            #     continue
+            items = data["items"]
+            print(
+                f"   raw industries count: {len(items)}"
+                f" | hasNext={data.get('hasNext')}"
+            )
 
-            if name and change_pct is not None:
-                sectors.append({
-                    "name_ko": name,
-                    "change_pct": change_pct,
-                })
+            if items and isinstance(items[0], dict):
+                print(f"   first item keys: {list(items[0].keys())}")
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+
+                name = str(item.get("name") or "").strip()
+                change_pct = safe_float(item.get("changeRate"))
+
+                # 可选：排除“기타”
+                # if name == "기타":
+                #     continue
+
+                if name and change_pct is not None:
+                    sectors.append({
+                        "name_ko": name,
+                        "change_pct": change_pct,
+                    })
+
+            if not data.get("hasNext"):
+                break
+
+            # 使用服务端返回的游标继续请求。
+            next_cursor = data.get("cursor")
+            if (
+                not items
+                or not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor in seen_cursors
+            ):
+                raise ValueError(
+                    "分页异常：hasNext=True，但 items 为空"
+                    "或 cursor 缺失/重复"
+                )
+
+            seen_cursors.add(next_cursor)
+            params["cursor"] = next_cursor
 
         sectors = dedupe_dict_list(sectors, ["name_ko"])
+        sectors.sort(key=lambda x: x["change_pct"], reverse=True)
+
         print(f"   ✅ KR sectors extracted: {len(sectors)}")
 
-        # 校验正负分布（非常关键）
-        n_up = sum(1 for s in sectors if s["change_pct"] > 0)
-        n_flat = sum(1 for s in sectors if s["change_pct"] == 0)
-        n_down = sum(1 for s in sectors if s["change_pct"] < 0)
-        print(f"   distribution: up={n_up}, flat={n_flat}, down={n_down}")
+        n_up = sum(s["change_pct"] > 0 for s in sectors)
+        n_flat = sum(s["change_pct"] == 0 for s in sectors)
+        n_down = sum(s["change_pct"] < 0 for s in sectors)
+        print(
+            f"   distribution: up={n_up}, "
+            f"flat={n_flat}, down={n_down}"
+        )
 
         if sectors:
-            by_pct = sorted(sectors, key=lambda x: x["change_pct"], reverse=True)
-            print("   Top3 up :", [(x["name_ko"], x["change_pct"]) for x in by_pct[:3]])
-            print("   Top3 down:", [(x["name_ko"], x["change_pct"]) for x in by_pct[-3:]])
+            print(
+                "   Top3 up:",
+                [(s["name_ko"], s["change_pct"]) for s in sectors[:3]],
+            )
+            print(
+                "   Top3 down:",
+                [
+                    (s["name_ko"], s["change_pct"])
+                    for s in sectors[-3:][::-1]
+                ],
+            )
 
         return sectors
 
